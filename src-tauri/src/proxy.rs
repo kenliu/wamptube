@@ -24,6 +24,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::resolve::{self, now_s, Kind, ResolvedTrack};
 
+mod hls;
+
 /// Upstream request size. Bounded ranges up to ~10 MB were measured at full
 /// speed; 2 MiB keeps waste low when the webview abandons a response.
 const CHUNK: u64 = 2 * 1024 * 1024;
@@ -53,6 +55,8 @@ pub struct StreamEntry {
     /// yt-dlp's `available_at`: requests before this unix time get 403.
     pub available_at: Option<i64>,
     last_reresolve: Option<i64>,
+    is_live: bool,
+    is_hls: bool,
 }
 
 pub struct ProxyState {
@@ -69,6 +73,7 @@ pub struct ProxyState {
     /// the same new track at once, and they must share one yt-dlp run.
     resolve_lock: tokio::sync::Mutex<()>,
     client: reqwest::Client,
+    hls: hls::Proxy,
     /// (token, block index, bytes, content type), most recent last. The lock is
     /// held across a fetch so concurrent readers of one block share it.
     blocks: tokio::sync::Mutex<VecDeque<(String, u64, Bytes, HeaderValue)>>,
@@ -103,6 +108,8 @@ impl ProxyState {
                 size: track.size_bytes,
                 available_at: track.available_at,
                 last_reresolve: None,
+                is_live: track.is_live,
+                is_hls: track.is_hls,
             },
         );
         token
@@ -207,12 +214,16 @@ pub async fn start_on(ip: IpAddr) -> std::io::Result<Arc<ProxyState>> {
         failed: RwLock::new(HashMap::new()),
         resolve_lock: tokio::sync::Mutex::new(()),
         client,
+        hls: hls::Proxy::new().map_err(std::io::Error::other)?,
         blocks: tokio::sync::Mutex::new(VecDeque::new()),
         upstream_requests: AtomicU64::new(0),
     });
     let mut app = Router::new().route("/stream/{token}", any(stream_handler));
     if ip.is_loopback() {
         app = app
+            .route("/playback/{video_id}", axum::routing::get(hls::playback_mode))
+            .route("/hls/{token}/live.m3u8", axum::routing::get(hls::playlist))
+            .route("/hls/{token}/resource/{id}", axum::routing::get(hls::resource))
             .route("/v/{video_id}", any(video_handler))
             .route("/vv/{video_id}", any(video_only_handler));
     }
@@ -245,8 +256,8 @@ fn cors(h: &mut HeaderMap) {
     );
 }
 
-fn simple(status: StatusCode, msg: &'static str) -> Response {
-    let mut r = Response::new(Body::from(msg));
+fn simple(status: StatusCode, msg: impl Into<Body>) -> Response {
+    let mut r = Response::new(msg.into());
     *r.status_mut() = status;
     r.headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
@@ -443,6 +454,10 @@ async fn serve(st: Arc<ProxyState>, token: String, method: Method, req_headers: 
         eprintln!("[proxy] {method} {} -> 404 unknown token", short(&token));
         return simple(StatusCode::NOT_FOUND, "unknown stream token");
     };
+
+    if entry.is_hls || entry.is_live {
+        return simple(StatusCode::UNPROCESSABLE_ENTITY, "this stream requires live HLS playback");
+    }
 
     let client_range = req_headers
         .get(header::RANGE)

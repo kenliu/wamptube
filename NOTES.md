@@ -278,3 +278,17 @@ here (speaker stops, local resumes at the speaker's position). 16 upstream block
   speaker would be possible but only loosely synced, as the speaker's position is polled once a
   second and it buffers ahead), and macOS is untried (Local
   Network permission prompt; WKWebView menu shows "This computer" plus the rooms).
+
+## Live streams (issue #15)
+
+The format listing for Lofi Girl's synthwave radio (`4xDzrJKXOOY`) reported
+`is_live` and two audio-only HLS variants (233 and 234). The byte-range proxy
+and MP4 `sidx` reader both assume a finite file. Local playback now detects
+live HLS during the lazy resolve and gives native HLS-capable webviews a
+loopback playlist. Rust rewrites playlist, initialization and segment URLs and
+refreshes the signed root playlist URL after an upstream 403 or 410. Live mode
+shows LIVE and ignores seeks. The VOD MSE feeder and its PCM visualizers are
+only used for finite tracks, and Sonos rejects live HLS.
+
+Live playback was confirmed in the macOS app. Long-running playlist refresh,
+pause/resume, and switching back to a seekable VOD still need targeted checks.

@@ -306,6 +306,9 @@ impl Player {
         }
         let px = self.proxy_toward(ip).await?;
         let t = resolve::resolve(video_id).await?;
+        if t.is_live || t.is_hls {
+            return Err("Live HLS is available on local playback only".into());
+        }
         let url = px.register(&t).await;
         eprintln!("[sonos] {ip} <- {video_id} {} ({}s)", t.title, t.duration_s);
         let meta = didl(&url, "audio/mp4", &t.title, t.channel.as_deref(), t.duration_s);
