@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { toWebampTrack } from '../src/addsource.ts';
 import { frameSize, getFrameWidth, setFrameWidth, VIDEO_STACK_FLOOR } from '../src/videowindow.ts';
+import { defaultOutputName, realOutputs } from '../src/output.ts';
 
 const track = {
   video_id: 'abcdefghijk',
@@ -42,4 +43,28 @@ Deno.test('frameSize is as tall as the stack, with a minimum height', () => {
 
 Deno.test('the stack floor leaves room for a full 16:9 picture plus chrome', () => {
   assert.equal(VIDEO_STACK_FLOOR, 20 + 14 + 252);
+});
+
+const devices = [
+  { kind: 'audioinput', deviceId: 'mic1', label: 'Microphone' },
+  { kind: 'audiooutput', deviceId: 'default', label: 'Default - Krisp Speaker (Krisp Audio)' },
+  { kind: 'audiooutput', deviceId: 'communications', label: 'Communications - Krisp Speaker (Krisp Audio)' },
+  { kind: 'audiooutput', deviceId: 'abc', label: 'Speakers (Realtek(R) Audio)' },
+  { kind: 'audiooutput', deviceId: 'def', label: 'Krisp Speaker (Krisp Audio)' },
+] as MediaDeviceInfo[];
+
+Deno.test('realOutputs keeps real output devices, not the default/communications aliases', () => {
+  assert.deepEqual(realOutputs(devices), [
+    { id: 'abc', label: 'Speakers (Realtek(R) Audio)' },
+    { id: 'def', label: 'Krisp Speaker (Krisp Audio)' },
+  ]);
+});
+
+Deno.test('realOutputs is empty when names are hidden (no permission)', () => {
+  assert.deepEqual(realOutputs([{ kind: 'audiooutput', deviceId: '', label: '' }] as MediaDeviceInfo[]), []);
+});
+
+Deno.test('defaultOutputName reads the system default from its alias', () => {
+  assert.equal(defaultOutputName(devices), 'Krisp Speaker (Krisp Audio)');
+  assert.equal(defaultOutputName([]), '');
 });

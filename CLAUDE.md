@@ -19,6 +19,7 @@ deno task build                   # type-check (tsc --noEmit) + front-end produc
 cd src-tauri
 cargo test                        # offline: unit tests + proxy against a fake upstream
 cargo test --test live_proxy -- --ignored --nocapture   # live: real yt-dlp + googlevideo
+cargo test --test live_sonos -- --ignored --nocapture   # live: plays a track on a Sonos (WAMPTUBE_SONOS_ROOM)
 cargo clippy --all-targets
 ```
 
@@ -47,6 +48,9 @@ Environment switches:
   `main.ts`), then play each quietly, deep-seek, pause and resume, logging `[selftest]` lines.
   This is the end-to-end check.
 - `VITE_SELFTEST=timeline` – same test videos; seek track 1 to fixed times and log the audio element's timeline.
+- `VITE_SELFTEST=sonos` (with `VITE_SONOS_ROOM=<room>`, else the first found) – same test videos;
+  start track 1 here, move it to the room, then check volume, seek, pause, next track, end-of-track
+  advance and moving back, logging `[selftest] ...-ok=` lines. Plays out loud at the room's volume.
 
 In `tauri dev`, the webview's `console.warn` and `console.error` are forwarded to the terminal;
 `console.log` is not. Rust logs `[proxy]`, `[resolve]` and `[yt-dlp]` lines to stderr. This is the
@@ -93,10 +97,28 @@ Two halves. The webview draws the UI and never contacts YouTube; the Rust core o
   bar; the playlist bar says PLAYLIST). Loaded as `initialSkin`, so a custom skin replaces it and
   renders only what it contains. Generated and committed: after upgrading webamp, rebuild it with
   `deno run -A tools/make-skin.ts` (reads the sprites out of the webamp bundle).
+- `src/output.ts` – the "Output device" submenu, added to Webamp's main (Winamp logo) menu by
+  DOM injection when it opens (Webamp has no menu API). Local devices: `setSinkId` on the one media
+  element, choice kept by device name in localStorage (WebView2 only; WKWebView has no `setSinkId`,
+  so macOS shows a single "This computer"). Below a separator, "Sonos: <room>" entries on every
+  platform, or a grey "Searching for Sonos…" / "No Sonos rooms found" line, so the submenu is
+  always there; a room choice is not kept across launches. Gets its Sonos hooks as a parameter so it
+  imports no DOM code (the Deno web tests import it).
+- `src/nativemenu.ts` – every Webamp menu (main, right-click, EQ presets, playlist buttons) shows
+  as a real OS popup menu, so it can extend past the window. Webamp still renders its HTML menu,
+  hidden by the `native-menus` class; a MutationObserver copies it into a Tauri `Menu` at the
+  cursor and, on a pick, clicks the matching HTML item (dismissing sends Webamp's click-away). So
+  anything injected into the HTML menu, like `output.ts`'s submenu, appears natively for free.
+  The native menu is a snapshot: it does not redraw while open.
+- `src-tauri/src/audio_out.rs` – Windows: grants the app's own origins microphone permission through
+  WebView2's profile API at startup, because Chromium hides output-device names and ids without it.
+  Nothing calls getUserMedia; the grant only unlocks `enumerateDevices`.
 - `src/style.css` – layout and the UI scale. `UI_SCALE` in `main.ts` drives a `--ui-scale` CSS
   variable applied as `transform: scale()` on `#webamp`.
 - `src-tauri/src/resolve.rs` – runs yt-dlp as a child process (no shell, validated ids, timeouts)
-  and parses its JSON. `parse_source` turns pasted input into a playlist or video id and accepts
+  and parses its JSON. It also watches yt-dlp's stderr for `n challenge solving failed` /
+  `Signature solving failed` (an out-of-date yt-dlp) and logs `yt-dlp --version` at startup;
+  lib.rs turns the warning into the `ytdlp-outdated` event, shown once in the status line. `parse_source` turns pasted input into a playlist or video id and accepts
   YouTube hosts only, so arbitrary URLs never reach yt-dlp. `list` is `-J --flat-playlist`: one
   request per playlist, no stream URLs.
 - `src-tauri/src/config.rs` – finds, reads and appends to `config.toml` (toml_edit, keeps comments).
@@ -104,6 +126,17 @@ Two halves. The webview draws the UI and never contacts YouTube; the Rust core o
   `GET|HEAD /stream/{token}` and `/v/{video_id}` with CORS and Range support so Webamp's Web Audio
   graph can use it. `/v/` resolves the video with yt-dlp on its first request (in a detached task,
   one at a time, failures cached 30 s), which is how a 56-track playlist loads without 56 resolves.
+- `src/sonosmedia.ts` – Webamp's media class is `RoutedMedia`: it forwards to `MseMedia` or, while a
+  Sonos room is picked, to `SonosMedia`, which sends commands and polls the speaker once a second
+  (position, and STOPPED near the end = `ended`). Nothing reaches the speaker until play, so loading
+  track 1 at launch never interrupts a room. Switching output carries the track and position over,
+  and the volume slider follows the output (the room's own volume, or the old local one). The
+  speaker gets audio only, so while a room plays the video pane shows a note (`setVideoNote`).
+- `src-tauri/src/sonos.rs` – Sonos discovery (SSDP on every interface), one room per zone group
+  (addressed by its coordinator), and transport/volume SOAP calls on port 1400. Commands accept
+  only addresses the last discovery returned. The speaker fetches from `proxy::start_on(lan_ip)`,
+  which serves only `/stream/{token}` and answers small ranges from cached 1 MiB blocks (Sonos
+  reads in 6 KB ranges). See NOTES.md.
 - `src-tauri/src/lib.rs` – Tauri setup, starts the proxy, registers the commands.
 
 ### Contract between the halves
@@ -115,6 +148,19 @@ All commands reject with a string. `TrackInfo` is
 invoke('startup_tracks')            -> { config_path, source_count, tracks: TrackInfo[], errors: string[] }
 invoke('list_source', { source })   -> { source /* canonical URL */, tracks: TrackInfo[] }
 invoke('save_source', { source })   -> boolean  /* false if already in the config */
+invoke('sonos_rooms')               -> { name, ip }[]          /* ~2 s discovery; [] if none */
+invoke('sonos_play_video', { ip, video_id }) -> number         /* duration_s; speaker reports 0 */
+invoke('sonos_control', { ip, action, value })                 /* play|pause|stop|seek s|volume 0-100 */
+invoke('sonos_status', { ip })      -> { state, rel_s }
+invoke('sonos_volume', { ip })      -> number
+```
+
+Events from the core:
+
+```
+ytdlp-outdated  { line, version /* string | null */ }   /* yt-dlp stderr said it could not solve
+                                                          YouTube's JS challenges; sent on every
+                                                          such run, main.ts shows it once */
 ```
 
 Keys are snake_case on purpose. Change both sides together.

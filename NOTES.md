@@ -79,6 +79,14 @@ file, so nothing plays. Other player clients on that version fail outright. 2026
 This is the "yt-dlp breaks when YouTube changes" risk from the spec, already real: the
 update-yt-dlp action matters more than its Polish-phase slot suggests.
 
+It happened again on 2026-11-27: yt-dlp 2026.10.26's challenge solver crashed under Deno 2.9.8,
+stderr carried `n challenge solving failed`, the video stream's `/v/` resolve returned 502 and
+the video pane stayed empty while audio kept playing. 2026.11.23 fixed it. Since then the core
+watches every yt-dlp run's stderr for `n challenge solving failed` and `Signature solving failed`
+(`resolve::stale_warning`) and sends a `ytdlp-outdated` event; the webview shows a one-time
+"yt-dlp may be outdated" line in the status area, click to hide. Startup logs
+`[resolve] yt-dlp version ...`. This is the warning only; the update action is still to come.
+
 ### 3. New URLs are not valid immediately
 
 yt-dlp 2026.10.26 reports `available_at` about 5–6 s after resolve; requests before then get 403.
@@ -136,6 +144,11 @@ which runs the full resolve on the first request for that video.
 - `u1MqeDGBo94` is 1,197 s with 15 chapters; `dkrpqUyiZgA` is 2,696 s with 14 chapters (channel is "The Moment", performer ATTAME). Both have chapter markers for later splitting.
 - **Extra Webamp windows** (for Library / Discover): no public option. `WindowId` is fixed to main / playlist / equalizer / milkdrop. An internal `ADD_GEN_WINDOW` action and `genWindows` reducer slice exist but are only reachable by dispatching to `webamp.store`; untried. Default plan stands: separate Tauri windows.
 - Window positions use Webamp's public `windowLayout` option.
+- **Menus are native (2026-11-28).** Webamp's HTML menus were clipped at the window edges, worst
+  with panes collapsed. `nativemenu.ts` mirrors each into a Tauri popup menu and clicks the hidden
+  HTML item on a pick. Untested so far: whether Load Skin... and Play > File... still open a file
+  picker (the click no longer comes from a user gesture), and macOS. A native menu doesn't redraw
+  while open, so the Sonos list shows what was known when it opened.
 - The spec says "two hardcoded test videos" but its table lists three; all three are in the playlist.
 - CSP is explicit. Milkdrop/butterchurn would need `'unsafe-eval'` in `script-src`; it is not enabled.
 - Versions: tauri 2.12.5, axum 0.8.9, reqwest 0.13.5, webamp 2.3.1, vite 8.3.8, typescript 7.0.2.
@@ -195,5 +208,73 @@ Windows 10 x64, Edge WebView2 (Chromium), yt-dlp 2026.10.26 and deno 2.9.8 from 
   a Windows problem.
 - **Durations are correct** (1197 s, 335 s, 2696 s). WebView2 does not have problem 1's doubled
   duration, which supports reading that problem as WKWebView-specific.
+- **Krisp Speaker as the system default output** made playback faint and warbly ("a radio
+  going in and out"). The element's own output (captured with `captureStream`) matched YouTube's
+  audio within ~1 dB, so the damage was downstream: Krisp's speaker-side noise cancellation.
+  Browsers had their own per-app device, wamptube got the default. Fixed by letting the user pick
+  the output device (`src/output.ts`); `setSinkId` moves the session, which Windows' audio session
+  list confirms.
 - Changes needed: yt-dlp lookup (`yt-dlp.exe`, no Unix permission check, Scoop and WinGet dirs),
   `CREATE_NO_WINDOW` on the child, `USERPROFILE` when `HOME` is unset, and an `icon.ico`.
+
+## Spike: Sonos output (2026-11-24)
+
+`src-tauri/src/sonos.rs` (discovery, group topology, transport and volume over Sonos's local UPnP
+on port 1400) and `tests/live_sonos.rs`, which plays one track on a real speaker:
+`cargo test --test live_sonos -- --ignored --nocapture`, with `WAMPTUBE_SONOS_ROOM` to pick a
+room and `WAMPTUBE_SONOS_IP` to skip discovery. The test caps volume at 20 and restores it.
+Windows 10, five speakers on S2 (Play:1, Play:3, Playbar, Connect:Amp); passed on a Connect:Amp
+room and a Play:3 room.
+
+- **Sonos plays YouTube's fragmented m4a (itag 140, AAC) as is** from the plain
+  `/stream/{token}` URL with `Content-Type: audio/mp4`. No remux, no extension needed (the `.m4a`
+  suffix the proxy now accepts was never tried). Starts in about 1 s.
+- **Seek, volume, pause and resume work.** `Seek REL_TIME` to 13:18 landed and played within 3 s.
+- **The speaker reports `TrackDuration` 0:00:00** even with a duration in the DIDL metadata
+  (likely because the fragmented file has no overall duration). `RelTime` is right. Use yt-dlp's
+  duration for the time display.
+- **Sonos reads in 6 KB ranges**, while playing and while seeking. To seek, it walks every
+  fragment header (~160 KB apart) from the start to the target. Passed straight through, that was
+  one googlevideo request per read: ~80 for one seek, ~3/s while playing. The proxy now serves
+  ranges under 256 KB on a non-loopback listener from aligned 1 MiB upstream blocks (16 cached).
+  Whole test: 17 upstream requests. A seek to 13 min still downloads the first 13 MB, because of
+  the fragment walk. A remux to a plain MP4 with a full sample table would fix that and the
+  duration, but it's not needed yet.
+- **A VPN that blocks LAN traffic hides every speaker** (Proton VPN as the default route: no
+  SSDP replies, router unreachable). Discovery now sends on every IPv4 interface, but the app
+  will need a "no speakers found; check VPN or firewall" hint.
+- `proxy::start_on(ip)` binds to the address that reaches the speaker
+  (`sonos::local_ip_toward`). On a non-loopback address it serves only `/stream/{token}`, never
+  the lazy `/v/` and `/vv/` routes, so other machines on the LAN can't make this one run yt-dlp.
+  The webview's loopback proxy is unchanged (no block cache there).
+
+### Wired into the player (2026-11-24)
+
+Output device menu lists "Sonos: <room>" (one per zone group) under the local devices (a grey
+"Searching for Sonos…" or "No Sonos rooms found" line when there are none; until 2026-11-27 the
+whole submenu was hidden on macOS in that case, which made it hard to find); picking one
+moves the current track there at the same position (`src/sonosmedia.ts`, `RoutedMedia` as Webamp's
+media class). `VITE_SELFTEST=sonos VITE_SONOS_ROOM=<room>` in the real app (Windows), all
+pass: local start, move to the room (playing from 6 s, local element paused), slider volume
+reaches the speaker (6 -> 3), Webamp seek to 598/1197 s (speaker at 601), pause holds, resume,
+next track, end-of-track advance (speaker STOPPED at 335/335 s -> track 3 starts), and moving back
+here (speaker stops, local resumes at the speaker's position). 16 upstream block fetches in all.
+
+- **End of track is inferred by polling.** `SonosMedia` polls `GetTransportInfo` +
+  `GetPositionInfo` once a second while playing; STOPPED within 5 s of the duration means
+  `ended`. STOPPED elsewhere (someone pressed stop in the Sonos app) just stops. Ignored for 5 s
+  after each command, since the speaker reports STOPPED/TRANSITIONING briefly after Play or Seek.
+- **Webamp keeps durations in `tracks[id].duration`**, set from `media.duration()` on
+  `fileLoaded`; `state.media.length` stays 0. Sonos reports duration 0, so `sonos_play_video`
+  returns yt-dlp's and `SonosMedia` emits `fileLoaded` again once it has it.
+- **Nothing reaches the speaker until play.** Loading track 1 at launch, or browsing, doesn't
+  touch the room; `sonos_play_video` (resolve + LAN proxy + SetAVTransportURI + Play) runs then.
+- The volume slider follows the output: on switching to a room it is set to that room's volume
+  (so nothing jumps), and back here to the old local volume.
+- Not done: pause/stop/volume changed from the Sonos app don't reach Webamp's UI (no GENA events;
+  only position and stop are polled), the room choice isn't kept across launches, grouped targets
+  are untested, EQ and visualizers do nothing while a room plays (the video pane says
+  "Playing on Sonos: <room>" instead of a picture; a muted local picture kept in step with the
+  speaker would be possible but only loosely synced, as the speaker's position is polled once a
+  second and it buffers ahead), and macOS is untried (Local
+  Network permission prompt; WKWebView menu shows "This computer" plus the rooms).

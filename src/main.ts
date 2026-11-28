@@ -3,10 +3,14 @@ import Webamp from 'webamp';
 // Throwaway MSE spike (see src/spike.ts): VITE_SPIKE=1 deno task tauri dev
 if (import.meta.env.VITE_SPIKE) location.replace('/spike.html');
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
-import { MseMedia, fxAudio, videoEl } from './msemedia';
+import { fxAudio, videoEl } from './msemedia';
+import { RoutedMedia, currentRoom, onSliderSync, routeTo, sonosRooms, sonosSearching, type Room } from './sonosmedia';
 import { demoSource } from './fx';
 import { installThrobber } from './throbber';
+import { installNativeMenus } from './nativemenu';
+import { installOutputMenu } from './output';
 import {
   VIDEO_STACK_FLOOR,
   frameSize,
@@ -47,6 +51,8 @@ type StartupTracks = {
 const TEST_VIDEO_IDS = ['u1MqeDGBo94', 'Hf20ZzMRs-I', 'dkrpqUyiZgA'];
 
 const statusEl = document.getElementById('status')!;
+/** Shown under every status message until clicked; see watchYtdlp. */
+let stickyEl: HTMLElement | null = null;
 function setStatus(lines: { text: string; err?: boolean }[]) {
   statusEl.replaceChildren(
     ...lines.map((l) => {
@@ -55,7 +61,35 @@ function setStatus(lines: { text: string; err?: boolean }[]) {
       if (l.err) d.className = 'err';
       return d;
     }),
+    ...(stickyEl ? [stickyEl] : []),
   );
+}
+
+type YtdlpOutdated = { line: string; version: string | null };
+
+/**
+ * yt-dlp warned that it could not solve YouTube's JS challenges (resolve.rs),
+ * which means it is out of date: playback can break with no other error.
+ * Say so once per launch, in the status line, until clicked. Playback goes on.
+ */
+async function watchYtdlp() {
+  let shown = false;
+  await listen<YtdlpOutdated>('ytdlp-outdated', ({ payload }) => {
+    console.warn(`[yt-dlp] outdated? ${payload.version ?? '(version unknown)'}: ${payload.line}`);
+    if (shown) return;
+    shown = true;
+    const v = payload.version ? ` ${payload.version}` : '';
+    const d = document.createElement('div');
+    d.className = 'err sticky';
+    d.textContent = `yt-dlp${v} may be outdated: update it (brew upgrade yt-dlp / scoop update yt-dlp). Click to hide.`;
+    d.title = payload.line;
+    d.addEventListener('click', () => {
+      d.remove();
+      stickyEl = null;
+    });
+    stickyEl = d;
+    statusEl.append(d);
+  });
 }
 
 type Line = { text: string; err?: boolean };
@@ -334,6 +368,8 @@ function logAudioErrors() {
 
 async function main() {
   logAudioErrors();
+  // before anything runs yt-dlp, so the first warning is not missed
+  await watchYtdlp().catch((e) => console.error('[yt-dlp] cannot watch for outdated warnings', e));
   setStatus([{ text: 'loading playlist…' }]);
 
   const { tracks, lines } = await loadTracks().catch((e) => ({
@@ -364,14 +400,18 @@ async function main() {
     handleTrackDropEvent: handleTrackDropEvent(notify),
     // private option in webamp 2.3.1; see resizeMiddleware
     __customMiddlewares: [resizeMiddleware],
-    // private option in webamp 2.3.1: video + audio through one MSE <video> element
-    __customMediaClass: MseMedia,
+    // private option in webamp 2.3.1: video + audio through one MSE <video> element,
+    // or a Sonos room picked in the Output device menu (sonosmedia.ts)
+    __customMediaClass: RoutedMedia,
   } as any);
 
   setBaseSkin = () => webamp.setSkinFromUrl(WAMPTUBE_SKIN);
+  onSliderSync((v) => webamp.setVolume(v));
+  installOutputMenu(videoEl, { rooms: () => sonosRooms(), searching: sonosSearching, current: currentRoom, routeTo });
 
   const inTauri = '__TAURI_INTERNALS__' in window;
   if (inTauri) {
+    installNativeMenus();
     webamp.onClose(() => {
       getCurrentWindow().close().catch((e) => console.error('close failed', e));
     });
@@ -420,6 +460,7 @@ async function main() {
   installResizeScaling();
 
   if (import.meta.env.VITE_SELFTEST === 'timeline') void timelineProbe(webamp);
+  else if (import.meta.env.VITE_SELFTEST === 'sonos') void sonosSelfTest(webamp);
   else if (import.meta.env.VITE_SELFTEST) void selfTest(webamp, tracks.length);
 }
 
@@ -497,6 +538,90 @@ async function selfTest(webamp: Webamp, count: number) {
   }
   webamp.stop();
   console.warn('[selftest] done');
+}
+
+/**
+ * Sonos check (VITE_SELFTEST=sonos, room from VITE_SONOS_ROOM or the first
+ * found): starts track 1 here, moves it to the room, then drives volume, seek,
+ * pause, next track and end-of-track through Webamp, and brings it back.
+ * Plays out loud in that room at its current volume.
+ */
+async function sonosSelfTest(webamp: Webamp) {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const log = (m: string) => console.warn(`[selftest] ${m}`);
+  const status = () => invoke<{ state: string; rel_s: number }>('sonos_status', { ip: room!.ip }).catch((e) => ({ state: String(e), rel_s: -1 }));
+
+  webamp.setVolume(4);
+  webamp.setCurrentTrack(0);
+  webamp.play();
+  for (let w = 0; w < 30 && !((lastAudio?.currentTime ?? 0) > 3); w++) await sleep(1000);
+  const tLocal = lastAudio?.currentTime ?? 0;
+  log(`local playing t=${tLocal.toFixed(1)} local-ok=${tLocal > 3}`);
+
+  let room: Room | undefined;
+  const want = import.meta.env.VITE_SONOS_ROOM as string | undefined;
+  for (let w = 0; w < 20 && !room; w++) {
+    const rooms = sonosRooms();
+    room = want ? rooms.find((r) => r.name.toLowerCase() === want.toLowerCase()) : rooms[0];
+    if (!room) await sleep(1000);
+  }
+  if (!room) { log(`no Sonos room ${want ?? ''} found; done`); return; }
+
+  const at = webamp.getMediaStatus() === 'PLAYING' ? lastAudio?.currentTime ?? 0 : 0;
+  await routeTo(room);
+  await sleep(6000);
+  let st = await status();
+  log(`routed to ${room.name} at ${at.toFixed(0)}s: ${st.state} rel=${st.rel_s} webamp=${webamp.getMediaStatus()} localPaused=${videoEl.paused}`);
+  log(`route-ok=${st.state === 'PLAYING' && st.rel_s >= at - 2 && st.rel_s < at + 15 && videoEl.paused}`);
+
+  const v0 = await invoke<number>('sonos_volume', { ip: room.ip });
+  webamp.setVolume(Math.max(v0 - 3, 0));
+  await sleep(1500);
+  const v1 = await invoke<number>('sonos_volume', { ip: room.ip });
+  log(`volume ${v0} -> slider ${Math.max(v0 - 3, 0)} -> speaker ${v1} volume-ok=${v1 === Math.max(v0 - 3, 0)}`);
+  webamp.setVolume(v0);
+  await sleep(1000);
+
+  const trackDur = () => {
+    const st = (webamp as any).store.getState();
+    return Math.round(st.tracks[st.playlist.currentTrack]?.duration ?? 0);
+  };
+  const dur = trackDur();
+  const target = Math.floor(dur / 2);
+  webamp.seekToTime(target);
+  await sleep(6000);
+  st = await status();
+  log(`seek to ${target}s (dur ${dur}): rel=${st.rel_s} seek-ok=${st.state === 'PLAYING' && st.rel_s >= target && st.rel_s < target + 12}`);
+
+  webamp.pause();
+  await sleep(2500);
+  st = await status();
+  log(`pause: ${st.state} pause-ok=${st.state === 'PAUSED_PLAYBACK'}`);
+  webamp.play();
+  await sleep(4000);
+  st = await status();
+  log(`resume: ${st.state} rel=${st.rel_s} resume-ok=${st.state === 'PLAYING' && st.rel_s >= target}`);
+
+  webamp.nextTrack();
+  await sleep(10000);
+  st = await status();
+  log(`next track: ${st.state} rel=${st.rel_s} next-ok=${st.state === 'PLAYING' && st.rel_s < 12}`);
+
+  const dur2 = trackDur();
+  webamp.seekToTime(Math.max(dur2 - 4, 0));
+  await sleep(16000);
+  st = await status();
+  log(`end of track (dur ${dur2}): ${st.state} rel=${st.rel_s} track=${(webamp as any).store.getState().playlist.currentTrack} advance-ok=${st.state === 'PLAYING' && st.rel_s < 14}`);
+
+  const atBack = webamp.getMediaStatus() === 'PLAYING' ? st.rel_s : 0;
+  await routeTo(null);
+  await sleep(8000);
+  st = await status();
+  const tBack = lastAudio?.currentTime ?? 0;
+  log(`back here: speaker ${st.state}, local t=${tBack.toFixed(1)} paused=${videoEl.paused} back-ok=${st.state === 'STOPPED' && !videoEl.paused && tBack >= atBack}`);
+
+  webamp.stop();
+  log('done');
 }
 
 main().catch((e) => {

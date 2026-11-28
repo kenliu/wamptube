@@ -1,11 +1,13 @@
+pub mod audio_out;
 pub mod config;
 pub mod proxy;
 pub mod resolve;
+pub mod sonos;
 
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Returned to the front end. Keys are snake_case and fixed by contract.
 #[derive(Debug, Clone, Serialize)]
@@ -68,6 +70,16 @@ pub struct ListedSource {
     /// Canonical URL, as stored in the config file.
     pub source: String,
     pub tracks: Vec<TrackInfo>,
+}
+
+/// Payload of the `ytdlp-outdated` event: yt-dlp warned that it could not
+/// solve YouTube's JS challenges. Keys are snake_case.
+#[derive(Debug, Clone, Serialize)]
+pub struct YtdlpOutdated {
+    /// The stderr line that tripped the check.
+    pub line: String,
+    /// `yt-dlp --version`, when the startup check has finished.
+    pub version: Option<String>,
 }
 
 fn track_infos(proxy: &proxy::ProxyState, entries: Vec<resolve::Entry>) -> Vec<TrackInfo> {
@@ -140,6 +152,51 @@ fn proxy_base(proxy: tauri::State<'_, Arc<proxy::ProxyState>>) -> String {
 }
 
 /// Append a source to the config file. Returns false if it was already there.
+/// Sonos rooms on the network (takes ~2 s). Empty when none answer.
+#[tauri::command(rename_all = "snake_case")]
+async fn sonos_rooms(sonos: tauri::State<'_, Arc<sonos::Player>>) -> Result<Vec<sonos::Room>, String> {
+    sonos.rooms().await
+}
+
+/// Start `video_id` on the room at `ip`; returns its duration in seconds.
+#[tauri::command(rename_all = "snake_case")]
+async fn sonos_play_video(sonos: tauri::State<'_, Arc<sonos::Player>>, ip: String, video_id: String) -> Result<u32, String> {
+    let ip = sonos.check(&ip).await?;
+    sonos.play_video(ip, &video_id).await
+}
+
+/// `action`: play, pause, stop, seek (`value` seconds) or volume (`value` 0-100).
+#[tauri::command(rename_all = "snake_case")]
+async fn sonos_control(
+    sonos: tauri::State<'_, Arc<sonos::Player>>,
+    ip: String,
+    action: String,
+    value: Option<u32>,
+) -> Result<(), String> {
+    let ip = sonos.check(&ip).await?;
+    let so = &sonos.so;
+    match (action.as_str(), value) {
+        ("play", _) => so.play(ip).await,
+        ("pause", _) => so.pause(ip).await,
+        ("stop", _) => so.stop(ip).await,
+        ("seek", Some(s)) => so.seek(ip, s).await,
+        ("volume", Some(v)) => so.set_volume(ip, v.min(100) as u8).await,
+        _ => Err(format!("bad sonos action {action} {value:?}")),
+    }
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn sonos_status(sonos: tauri::State<'_, Arc<sonos::Player>>, ip: String) -> Result<sonos::Status, String> {
+    let ip = sonos.check(&ip).await?;
+    sonos.status(ip).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn sonos_volume(sonos: tauri::State<'_, Arc<sonos::Player>>, ip: String) -> Result<u8, String> {
+    let ip = sonos.check(&ip).await?;
+    sonos.so.volume(ip).await
+}
+
 #[tauri::command]
 async fn save_source(source: String) -> Result<bool, String> {
     let canonical = resolve::parse_source(&source)?.canonical_url();
@@ -152,9 +209,29 @@ pub fn run() {
         .setup(|app| {
             let proxy = tauri::async_runtime::block_on(proxy::start())?;
             app.manage(proxy);
+            app.manage(Arc::new(sonos::Player::default()));
+            audio_out::allow_device_list(app);
+            let handle = app.handle().clone();
+            resolve::on_stale_warning(move |line| {
+                let payload = YtdlpOutdated { line: line.to_string(), version: resolve::version().map(String::from) };
+                if let Err(e) = handle.emit("ytdlp-outdated", payload) {
+                    eprintln!("[resolve] could not send ytdlp-outdated: {e}");
+                }
+            });
+            tauri::async_runtime::spawn(resolve::check_version());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![startup_tracks, list_source, save_source, proxy_base])
+        .invoke_handler(tauri::generate_handler![
+            startup_tracks,
+            list_source,
+            save_source,
+            proxy_base,
+            sonos_rooms,
+            sonos_play_video,
+            sonos_control,
+            sonos_status,
+            sonos_volume
+        ])
         .run(tauri::generate_context!())
         .expect("error while running wamptube");
 }

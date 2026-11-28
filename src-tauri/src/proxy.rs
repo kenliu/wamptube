@@ -7,7 +7,9 @@
 //! it as one response and fills the body from sequential bounded upstream
 //! requests of `CHUNK` bytes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +34,13 @@ const RERESOLVE_MIN_GAP_S: i64 = 30;
 const MAX_AVAILABILITY_WAIT_S: i64 = 15;
 /// Window after `available_at` in which a 403 is treated as "not ready yet".
 const AVAILABILITY_GRACE_S: i64 = 10;
+/// Network renderers (Sonos) read in ~6 KB ranges, both while playing and while
+/// walking the fragments to seek. On the LAN listener, ranges up to
+/// `SMALL_RANGE` are served from aligned `BLOCK`-sized upstream fetches kept in
+/// a small cache, instead of one googlevideo request each.
+const SMALL_RANGE: u64 = 256 * 1024;
+const BLOCK: u64 = 1024 * 1024;
+const CACHED_BLOCKS: usize = 16;
 
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
@@ -48,6 +57,8 @@ pub struct StreamEntry {
 
 pub struct ProxyState {
     pub port: u16,
+    /// Address the server is bound to, and the host in the URLs it hands out.
+    pub host: IpAddr,
     tokens: RwLock<HashMap<String, StreamEntry>>,
     /// video id -> token, for `/v/{video_id}` URLs that resolve on first use.
     by_video: RwLock<HashMap<String, String>>,
@@ -58,6 +69,11 @@ pub struct ProxyState {
     /// the same new track at once, and they must share one yt-dlp run.
     resolve_lock: tokio::sync::Mutex<()>,
     client: reqwest::Client,
+    /// (token, block index, bytes, content type), most recent last. The lock is
+    /// held across a fetch so concurrent readers of one block share it.
+    blocks: tokio::sync::Mutex<VecDeque<(String, u64, Bytes, HeaderValue)>>,
+    /// Requests sent to googlevideo, for tests and logs.
+    pub upstream_requests: AtomicU64,
 }
 
 impl ProxyState {
@@ -93,13 +109,13 @@ impl ProxyState {
     }
 
     pub fn url_for(&self, token: &str) -> String {
-        format!("http://127.0.0.1:{}/stream/{token}", self.port)
+        format!("http://{}/stream/{token}", SocketAddr::new(self.host, self.port))
     }
 
     /// Loopback URL for a video that is resolved only when first requested.
     /// Assumes `video_id` is valid (the handler checks again).
     pub fn video_url(&self, video_id: &str) -> String {
-        format!("http://127.0.0.1:{}/v/{video_id}", self.port)
+        format!("http://{}/v/{video_id}", SocketAddr::new(self.host, self.port))
     }
 
     /// The token serving `video_id`, running yt-dlp if there is none yet.
@@ -170,7 +186,14 @@ impl ProxyState {
 
 /// Bind 127.0.0.1:0, spawn the server on the current tokio runtime.
 pub async fn start() -> std::io::Result<Arc<ProxyState>> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
+    start_on(IpAddr::V4(Ipv4Addr::LOCALHOST)).await
+}
+
+/// Bind `ip:0` and spawn the server. On a non-loopback address (for a network
+/// speaker such as Sonos) only `/stream/{token}` is served: the lazy `/v/` and
+/// `/vv/` routes would let anyone on the network run yt-dlp on this machine.
+pub async fn start_on(ip: IpAddr) -> std::io::Result<Arc<ProxyState>> {
+    let listener = tokio::net::TcpListener::bind((ip, 0)).await?;
     let port = listener.local_addr()?.port();
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -178,23 +201,28 @@ pub async fn start() -> std::io::Result<Arc<ProxyState>> {
         .map_err(std::io::Error::other)?;
     let state = Arc::new(ProxyState {
         port,
+        host: ip,
         tokens: RwLock::new(HashMap::new()),
         by_video: RwLock::new(HashMap::new()),
         failed: RwLock::new(HashMap::new()),
         resolve_lock: tokio::sync::Mutex::new(()),
         client,
+        blocks: tokio::sync::Mutex::new(VecDeque::new()),
+        upstream_requests: AtomicU64::new(0),
     });
-    let app = Router::new()
-        .route("/stream/{token}", any(stream_handler))
-        .route("/v/{video_id}", any(video_handler))
-        .route("/vv/{video_id}", any(video_only_handler))
-        .with_state(state.clone());
+    let mut app = Router::new().route("/stream/{token}", any(stream_handler));
+    if ip.is_loopback() {
+        app = app
+            .route("/v/{video_id}", any(video_handler))
+            .route("/vv/{video_id}", any(video_only_handler));
+    }
+    let app = app.with_state(state.clone());
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             eprintln!("[proxy] server stopped: {e}");
         }
     });
-    eprintln!("[proxy] listening on http://127.0.0.1:{port}");
+    eprintln!("[proxy] listening on http://{}", SocketAddr::new(ip, port));
     Ok(state)
 }
 
@@ -281,6 +309,7 @@ async fn upstream_get(
 ) -> Result<reqwest::Response, String> {
     let range = format!("bytes={start}-{end}");
     let mut entry = st.entry(token).await.ok_or("token vanished")?;
+    st.upstream_requests.fetch_add(1, Ordering::Relaxed);
     let resp = fetch_when_available(&st.client, &entry, &range).await.map_err(|e| e.to_string())?;
     if resp.status() != reqwest::StatusCode::FORBIDDEN {
         return Ok(resp);
@@ -348,6 +377,8 @@ async fn stream_handler(
     method: Method,
     req_headers: HeaderMap,
 ) -> Response {
+    // An optional `.m4a` suffix: some renderers (Sonos) pick a decoder by extension.
+    let token = token.strip_suffix(".m4a").map(str::to_string).unwrap_or(token);
     serve(st, token, method, req_headers).await
 }
 
@@ -469,8 +500,27 @@ async fn serve(st: Arc<ProxyState>, token: String, method: Method, req_headers: 
         }
     };
 
-    // First upstream chunk before we commit to a status line.
     let is_head = method == Method::HEAD;
+    if !is_head && partial && !st.host.is_loopback() && end - start < SMALL_RANGE {
+        match cached_range(&st, &token, start, end, total).await {
+            Ok((bytes, content_type)) => {
+                let mut r = Response::new(Body::from(bytes));
+                *r.status_mut() = StatusCode::PARTIAL_CONTENT;
+                let h = r.headers_mut();
+                h.insert(header::CONTENT_TYPE, content_type);
+                if let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
+                    h.insert(header::CONTENT_RANGE, v);
+                }
+                h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+                h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                cors(h);
+                return r;
+            }
+            Err(e) => eprintln!("[proxy] {tok} range={range_label} block cache: {e}; fetching directly"),
+        }
+    }
+
+    // First upstream chunk before we commit to a status line.
     let first_end = if is_head { start } else { end.min(start + CHUNK - 1) };
     let first = match upstream_get(&st, &token, start, first_end).await {
         Ok(r) => r,
@@ -577,6 +627,53 @@ async fn serve(st: Arc<ProxyState>, token: String, method: Method, req_headers: 
     h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     cors(h);
     r
+}
+
+/// Bytes `start..=end` (which span at most two blocks) from the block cache,
+/// fetching missing blocks from upstream.
+async fn cached_range(st: &ProxyState, token: &str, start: u64, end: u64, total: u64) -> Result<(Bytes, HeaderValue), String> {
+    let mut out = Vec::with_capacity((end - start + 1) as usize);
+    let mut content_type = None;
+    let mut cache = st.blocks.lock().await;
+    for idx in start / BLOCK..=end / BLOCK {
+        let hit = cache.iter().position(|(t, i, ..)| t == token && *i == idx);
+        let (bytes, ct) = match hit {
+            Some(p) => {
+                let e = cache.remove(p).expect("position is in range");
+                let v = (e.2.clone(), e.3.clone());
+                cache.push_back(e);
+                v
+            }
+            None => {
+                let (bs, be) = (idx * BLOCK, ((idx + 1) * BLOCK).min(total) - 1);
+                let r = upstream_get(st, token, bs, be).await?;
+                if !r.status().is_success() {
+                    return Err(format!("upstream {}", r.status().as_u16()));
+                }
+                let ct = r
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok())
+                    .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
+                let b = r.bytes().await.map_err(|e| e.to_string())?;
+                if b.len() as u64 != be - bs + 1 {
+                    return Err(format!("short block {bs}-{be}: got {} bytes", b.len()));
+                }
+                eprintln!("[proxy] {} block {idx} ({bs}-{be}) fetched", short(token));
+                cache.push_back((token.to_string(), idx, b.clone(), ct.clone()));
+                if cache.len() > CACHED_BLOCKS {
+                    cache.pop_front();
+                }
+                (b, ct)
+            }
+        };
+        let base = idx * BLOCK;
+        let from = start.max(base) - base;
+        let to = end.min(base + bytes.len() as u64 - 1) - base;
+        out.extend_from_slice(&bytes[from as usize..=to as usize]);
+        content_type.get_or_insert(ct);
+    }
+    Ok((Bytes::from(out), content_type.expect("at least one block")))
 }
 
 async fn fetch(

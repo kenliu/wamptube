@@ -122,3 +122,55 @@ async fn ranges_cors_and_status_passthrough() {
     assert_eq!(r.status(), 404, "non-403 upstream errors pass through");
     assert_eq!(r.headers()["access-control-allow-origin"], "*");
 }
+
+/// On a non-loopback listener (the Sonos path), many small ranges are served
+/// from a few aligned block fetches, byte-exact, including across a block edge.
+#[tokio::test]
+async fn small_ranges_share_block_fetches_on_lan_listener() {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(l, Router::new().route("/videoplayback", get(upstream))).await.unwrap();
+    });
+
+    // 0.0.0.0 is not loopback, so the block cache is on; connect via 127.0.0.1.
+    let px = proxy::start_on("0.0.0.0".parse().unwrap()).await.unwrap();
+    let track = ResolvedTrack {
+        video_id: "u1MqeDGBo94".into(),
+        upstream_url: format!("http://127.0.0.1:{up_port}/videoplayback?expire=1"),
+        headers: vec![("X-Yt".into(), "1".into())],
+        title: "t".into(),
+        channel: None,
+        codec: "mp4a.40.2".into(),
+        bitrate_kbps: None,
+        sample_rate_hz: None,
+        duration_s: 0,
+        expires_at: 0,
+        size_bytes: Some(TOTAL as u64),
+        available_at: None,
+    };
+    let url = px.register(&track).await.replace("0.0.0.0", "127.0.0.1");
+    let c = reqwest::Client::new();
+    let d = data();
+
+    // Sequential 6 KB reads over the first ~1.2 MB (crosses the 1 MiB edge).
+    let mut pos = 0usize;
+    while pos < 1_200_000 {
+        let end = pos + 6143;
+        let r = c.get(&url).header("Range", format!("bytes={pos}-{end}")).send().await.unwrap();
+        assert_eq!(r.status(), 206);
+        assert_eq!(r.headers()["content-range"], format!("bytes {pos}-{end}/{TOTAL}"));
+        assert_eq!(r.bytes().await.unwrap(), d[pos..=end], "bytes {pos}-{end}");
+        pos = end + 1;
+    }
+    assert_eq!(px.upstream_requests.load(std::sync::atomic::Ordering::Relaxed), 2, "two 1 MiB blocks");
+
+    // A seek walk: 6 KB reads 160 KB apart to near the end (last block is short).
+    let before = px.upstream_requests.load(std::sync::atomic::Ordering::Relaxed);
+    for pos in (1_300_000..TOTAL - 6144).step_by(160_000) {
+        let r = c.get(&url).header("Range", format!("bytes={pos}-{}", pos + 6143)).send().await.unwrap();
+        assert_eq!(r.bytes().await.unwrap(), d[pos..pos + 6144]);
+    }
+    let after = px.upstream_requests.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(after - before <= 4, "seek walk took {} upstream requests", after - before);
+}

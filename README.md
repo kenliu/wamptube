@@ -70,6 +70,10 @@ Windows already has.
 The settings file is `%USERPROFILE%\.config\wamptube\config.toml`. Keep yt-dlp up to date
 with `winget upgrade yt-dlp.yt-dlp` or `scoop update yt-dlp`.
 
+If music sounds faint or warbly, check where it's going: noise-cancelling virtual speakers such
+as Krisp Speaker or NVIDIA Broadcast treat music as noise. Pick your real speakers under the logo
+menu's **Output device**.
+
 To build it yourself on Windows, install Rust with [rustup](https://rustup.rs) (it sets up
 the Microsoft C++ build tools it needs), then use the same `deno` commands as below.
 
@@ -137,6 +141,8 @@ It works like Winamp:
 - **Drag the bottom-right corner of the playlist** to make it taller or shorter.
 - **Drag the main window's title bar** to move the app around your screen.
 - The **X** in the top-right corner quits the app.
+- **Pick the speakers** (Windows): click the logo in the top-left corner, then **Output device**.
+  The choice is remembered.
 
 ## Known issues
 
