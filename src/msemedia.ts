@@ -11,6 +11,7 @@ import { pcmAnalyser, pcmSource } from './pcm';
 
 type Cb = (...a: unknown[]) => void;
 const STOPPED = 0, PLAYING = 1, PAUSED = 2;
+const statusEl = document.getElementById('status');
 
 /** The element the picture shows on; main.ts puts it on screen. */
 export const videoEl = document.createElement('video');
@@ -21,6 +22,7 @@ export class MseMedia {
   private handlers = new Map<string, Cb[]>();
   private session = new MseSession(videoEl);
   private status = STOPPED;
+  private loadGeneration = 0;
   private off: Array<() => void> = [];
 
   constructor() {
@@ -35,12 +37,17 @@ export class MseMedia {
     }
     listen('timeupdate', () => this.emit('timeupdate'));
     listen('durationchange', () => this.emit('fileLoaded'));
-    listen('ended', () => { this.setStatus(STOPPED); this.emit('ended'); });
+    listen('ended', () => this.endTrack());
     listen('error', () => {
       console.error('[mse] element error', videoEl.error?.code, videoEl.error?.message);
-      this.setStatus(STOPPED);
-      this.emit('ended'); // like Webamp: don't get stuck, act as if the track ended
+      this.endTrack();
     });
+  }
+
+  private endTrack() {
+    statusEl?.removeAttribute('data-live');
+    this.setStatus(STOPPED);
+    this.emit('ended');
   }
 
   private emit(ev: string) { this.handlers.get(ev)?.forEach((cb) => cb()); }
@@ -54,17 +61,23 @@ export class MseMedia {
     this.handlers.set(event, [...(this.handlers.get(event) ?? []), cb]);
   }
 
-  duration() { const d = videoEl.duration; return Number.isFinite(d) ? d : 0; }
+  duration() { const d = videoEl.duration; return !this.session.isLive && Number.isFinite(d) ? d : 0; }
   timeElapsed() { return videoEl.currentTime; }
 
   async play() {
     if (this.status !== PAUSED) this.seekToTime(0);
-    try { await videoEl.play(); } catch { /* the element reports it through 'error' */ }
-    this.setStatus(PLAYING);
+    const generation = this.loadGeneration;
+    try {
+      await videoEl.play();
+    } catch {
+      return; // A failed load is reported by the element's error event.
+    }
+    if (generation === this.loadGeneration && !videoEl.paused) this.setStatus(PLAYING);
   }
   pause() { videoEl.pause(); this.setStatus(PAUSED); }
-  stop() { videoEl.pause(); videoEl.currentTime = 0; this.setStatus(STOPPED); }
+  stop() { videoEl.pause(); if (!this.session.isLive) videoEl.currentTime = 0; this.setStatus(STOPPED); }
   seekToTime(t: number) {
+    if (this.session.isLive) return;
     videoEl.currentTime = Math.min(Math.max(t, 0), this.duration());
     this.emit('timeupdate');
   }
@@ -88,10 +101,13 @@ export class MseMedia {
     // Resolving + fetching the first chunks takes seconds: the start-of-track buffering.
     setBuffering('load', true);
     this.status = STOPPED;
+    const generation = ++this.loadGeneration;
+    statusEl?.removeAttribute('data-live');
     let current: boolean;
     try {
       current = await this.session.load(m[1], m[2], isVideoOpen());
     } catch (e) {
+      if (generation !== this.loadGeneration) return;
       console.error('[mse] load failed', String((e as Error)?.message ?? e));
       setBuffering('load', false);
       this.emit('stopWaiting');
@@ -99,7 +115,8 @@ export class MseMedia {
       return;
     }
     console.warn(`[mse] ${m[2]} ${current ? 'ready' : 'superseded'}`);
-    if (!current) return; // a newer track was requested meanwhile; it owns the UI state now
+    if (!current || generation !== this.loadGeneration) return; // a newer track was requested meanwhile; it owns the UI state now
+    statusEl?.toggleAttribute('data-live', this.session.isLive);
     this.emit('stopWaiting');
     if (autoPlay) {
       // Data is appended but playback hasn't started: keep throbbing until 'playing'.
@@ -112,6 +129,8 @@ export class MseMedia {
   }
 
   dispose() {
+    this.loadGeneration++;
+    statusEl?.removeAttribute('data-live');
     this.session.dispose();
     this.off.forEach((f) => f());
     this.pause();

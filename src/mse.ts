@@ -112,6 +112,10 @@ export class MseSession {
   private gen = 0;
   private timer: number | undefined;
   private url: string | undefined;
+  private live = false;
+  private onSeeking: (() => void) | undefined;
+
+  get isLive() { return this.live; }
 
   constructor(private el: HTMLVideoElement) {}
 
@@ -127,6 +131,20 @@ export class MseSession {
     pcmSetTrack(null);
     const gen = this.gen;
     const alive = () => gen === this.gen;
+    const mode = await fetch(`${base}/playback/${videoId}`, { cache: 'no-store' });
+    if (!alive()) return false;
+    if (!mode.ok) throw new Error(`Playback lookup failed (HTTP ${mode.status})`);
+    const livePath = await mode.text();
+    if (!alive()) return false;
+    if (livePath) {
+      if (!this.el.canPlayType('application/vnd.apple.mpegurl')) {
+        throw new Error('This webview cannot play live HLS');
+      }
+      this.live = true;
+      this.el.src = `${base}${livePath}`;
+      return true;
+    }
+
     const [audio, video] = await Promise.all([
       loadTrack('audio', `${base}/v/${videoId}`, 'audio'),
       // With the video window off, skip the video stream entirely: audio only.
@@ -148,6 +166,7 @@ export class MseSession {
     if (!alive()) return false;
     ms.duration = Math.max(audio.duration, video?.duration ?? 0);
     const pumpAll = () => feeders.forEach((f) => f.pump().catch((e) => alive() && console.error('[mse] pump', String(e))));
+    this.onSeeking = pumpAll;
     this.el.addEventListener('seeking', pumpAll);
     this.timer = window.setInterval(pumpAll, 500);
     pumpAll();
@@ -156,6 +175,9 @@ export class MseSession {
 
   dispose() {
     this.gen++;
+    this.live = false;
+    if (this.onSeeking) this.el.removeEventListener('seeking', this.onSeeking);
+    this.onSeeking = undefined;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
     if (this.url) URL.revokeObjectURL(this.url);

@@ -71,6 +71,8 @@ pub struct ResolvedTrack {
     pub bitrate_kbps: Option<u32>,
     pub sample_rate_hz: Option<u32>,
     pub duration_s: u32,
+    pub is_live: bool,
+    pub is_hls: bool,
     pub expires_at: i64,
     /// Exact size of the audio stream, when yt-dlp reports it.
     pub size_bytes: Option<u64>,
@@ -258,6 +260,9 @@ pub fn parse_ytdlp_json(video_id: &str, json: &str) -> Result<ResolvedTrack, Str
         bitrate_kbps: as_u32(fmt.get("abr")),
         sample_rate_hz: as_u32(fmt.get("asr")),
         duration_s: as_u32(root.get("duration")).unwrap_or(0),
+        is_live: root.get("live_status").and_then(Value::as_str) == Some("is_live")
+            || root.get("is_live").and_then(Value::as_bool) == Some(true),
+        is_hls: matches!(fmt.get("protocol").and_then(Value::as_str), Some("m3u8" | "m3u8_native")),
         expires_at,
         size_bytes: fmt.get("filesize").and_then(Value::as_u64),
         available_at: fmt
@@ -539,12 +544,23 @@ mod tests {
             "duration":1197,"url":"https://x.googlevideo.com/videoplayback?expire=1794742059&a=b",
             "http_headers":{"User-Agent":"UA"}}"#;
         let t = parse_ytdlp_json("u1MqeDGBo94", j).unwrap();
+        assert!(!t.is_live && !t.is_hls);
         assert_eq!(t.channel.as_deref(), Some("U"));
         assert_eq!(t.bitrate_kbps, Some(129));
         assert_eq!(t.sample_rate_hz, Some(44100));
         assert_eq!(t.expires_at, 1794742059);
         assert_eq!(t.headers, vec![("User-Agent".into(), "UA".into())]);
         assert!(parse_ytdlp_json("x", "WARNING nope").unwrap_err().starts_with("Unparseable"));
+    }
+
+    #[test]
+    fn detects_audio_only_live_hls_with_unknown_codec() {
+        let json = r#"{"live_status":"is_live","format_id":"234","protocol":"m3u8",
+            "ext":"mp4","vcodec":"none","url":"https://manifest.googlevideo.com/live.m3u8"}"#;
+        let track = parse_ytdlp_json("4xDzrJKXOOY", json).unwrap();
+        assert!(track.is_live && track.is_hls);
+        assert_eq!(track.duration_s, 0);
+        assert_eq!(track.codec, "unknown");
     }
 
     #[test]

@@ -59,6 +59,7 @@ html.native-menus #webamp-context-menu { visibility: hidden; }
   padding: calc(1px * var(--ui-scale)) calc(3px * var(--ui-scale));
   pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere;
 }
+#status[data-live]::before { content: "LIVE"; display: block; }
 #status .err { color: #f88; }
 #status .sticky { pointer-events: auto; cursor: pointer; }
 
