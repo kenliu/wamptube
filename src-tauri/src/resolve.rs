@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -133,6 +134,46 @@ fn last_stderr_line(stderr: &str) -> String {
         .unwrap_or_else(|| "(no output on stderr)".into())
 }
 
+/// yt-dlp warnings that mean it can no longer solve YouTube's JS challenges,
+/// which in practice means it is out of date (NOTES.md, problem 2). Formats
+/// go missing or stop playing, often with no error of yt-dlp's own.
+const STALE_MARKERS: &[&str] = &["n challenge solving failed", "signature solving failed"];
+
+/// The first stderr line that says yt-dlp looks out of date, if any.
+pub fn stale_warning(stderr: &str) -> Option<&str> {
+    stderr.lines().map(str::trim).find(|l| {
+        let l = l.to_ascii_lowercase();
+        STALE_MARKERS.iter().any(|m| l.contains(m))
+    })
+}
+
+type StaleHook = Box<dyn Fn(&str) + Send + Sync>;
+static STALE_HOOK: OnceLock<StaleHook> = OnceLock::new();
+static VERSION: OnceLock<String> = OnceLock::new();
+
+/// Called with the offending stderr line on every yt-dlp run that warns it
+/// looks out of date. Set once, at startup (lib.rs sends it to the webview).
+pub fn on_stale_warning(f: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = STALE_HOOK.set(Box::new(f));
+}
+
+/// The version `check_version` found, if it has run and succeeded.
+pub fn version() -> Option<&'static str> {
+    VERSION.get().map(String::as_str)
+}
+
+/// Run `yt-dlp --version` once (no network) and log it.
+pub async fn check_version() {
+    match run_ytdlp(&["--version"], Duration::from_secs(10), "checking its version").await {
+        Ok(v) => {
+            let v = v.trim().to_string();
+            eprintln!("[resolve] yt-dlp version {v}");
+            let _ = VERSION.set(v);
+        }
+        Err(e) => eprintln!("[resolve] yt-dlp version check failed: {e}"),
+    }
+}
+
 pub fn now_s() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -255,6 +296,12 @@ async fn run_ytdlp(args: &[&str], timeout: Duration, what: &str) -> Result<Strin
     let stderr = String::from_utf8_lossy(&out.stderr);
     for line in stderr.lines().filter(|l| !l.trim().is_empty()) {
         eprintln!("[yt-dlp] {line}");
+    }
+    if let Some(line) = stale_warning(&stderr) {
+        eprintln!("[resolve] yt-dlp {} looks out of date", version().unwrap_or("(version unknown)"));
+        if let Some(hook) = STALE_HOOK.get() {
+            hook(line);
+        }
     }
     if !out.status.success() {
         return Err(format!(
@@ -426,6 +473,19 @@ mod tests {
         assert!(!is_valid_video_id("u1MqeDG;o94"));
         assert!(!is_valid_video_id("u1MqeDG o94"));
         assert!(!is_valid_video_id("u1MqeDGBo9é"));
+    }
+
+    #[test]
+    fn detects_stale_ytdlp_warnings() {
+        let n = "[youtube] Extracting URL: https://www.youtube.com/watch?v=Hf20ZzMRs-I
+            [jsc:deno] Solving JS challenges using deno
+            WARNING: [youtube] Hf20ZzMRs-I: n challenge solving failed: Some formats may be missing.             Ensure you have a supported JavaScript runtime and challenge solver script distribution installed.
+";
+        assert!(stale_warning(n).unwrap().starts_with("WARNING: [youtube] Hf20ZzMRs-I: n challenge"));
+        let sig = "  WARNING: [youtube] x: Signature solving failed: Some formats may be missing.  ";
+        assert_eq!(stale_warning(sig), Some(sig.trim()));
+        assert_eq!(stale_warning("WARNING: [youtube] x: Some web client https formats have been skipped"), None);
+        assert_eq!(stale_warning(""), None);
     }
 
     #[test]

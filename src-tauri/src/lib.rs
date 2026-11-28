@@ -7,7 +7,7 @@ pub mod sonos;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Returned to the front end. Keys are snake_case and fixed by contract.
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +70,16 @@ pub struct ListedSource {
     /// Canonical URL, as stored in the config file.
     pub source: String,
     pub tracks: Vec<TrackInfo>,
+}
+
+/// Payload of the `ytdlp-outdated` event: yt-dlp warned that it could not
+/// solve YouTube's JS challenges. Keys are snake_case.
+#[derive(Debug, Clone, Serialize)]
+pub struct YtdlpOutdated {
+    /// The stderr line that tripped the check.
+    pub line: String,
+    /// `yt-dlp --version`, when the startup check has finished.
+    pub version: Option<String>,
 }
 
 fn track_infos(proxy: &proxy::ProxyState, entries: Vec<resolve::Entry>) -> Vec<TrackInfo> {
@@ -201,6 +211,14 @@ pub fn run() {
             app.manage(proxy);
             app.manage(Arc::new(sonos::Player::default()));
             audio_out::allow_device_list(app);
+            let handle = app.handle().clone();
+            resolve::on_stale_warning(move |line| {
+                let payload = YtdlpOutdated { line: line.to_string(), version: resolve::version().map(String::from) };
+                if let Err(e) = handle.emit("ytdlp-outdated", payload) {
+                    eprintln!("[resolve] could not send ytdlp-outdated: {e}");
+                }
+            });
+            tauri::async_runtime::spawn(resolve::check_version());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -60,6 +60,7 @@ html.native-menus #webamp-context-menu { visibility: hidden; }
   pointer-events: none; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 #status .err { color: #f88; }
+#status .sticky { pointer-events: auto; cursor: pointer; }
 
 /* ADD > URL box (src/addsource.ts). Sized in 1x px times the UI scale. */
 #add-url {

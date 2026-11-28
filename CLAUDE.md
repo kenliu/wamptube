@@ -114,7 +114,9 @@ Two halves. The webview draws the UI and never contacts YouTube; the Rust core o
 - `src/style.css` – layout and the UI scale. `UI_SCALE` in `main.ts` drives a `--ui-scale` CSS
   variable applied as `transform: scale()` on `#webamp`.
 - `src-tauri/src/resolve.rs` – runs yt-dlp as a child process (no shell, validated ids, timeouts)
-  and parses its JSON. `parse_source` turns pasted input into a playlist or video id and accepts
+  and parses its JSON. It also watches yt-dlp's stderr for `n challenge solving failed` /
+  `Signature solving failed` (an out-of-date yt-dlp) and logs `yt-dlp --version` at startup;
+  lib.rs turns the warning into the `ytdlp-outdated` event, shown once in the status line. `parse_source` turns pasted input into a playlist or video id and accepts
   YouTube hosts only, so arbitrary URLs never reach yt-dlp. `list` is `-J --flat-playlist`: one
   request per playlist, no stream URLs.
 - `src-tauri/src/config.rs` – finds, reads and appends to `config.toml` (toml_edit, keeps comments).
@@ -149,6 +151,14 @@ invoke('sonos_play_video', { ip, video_id }) -> number         /* duration_s; sp
 invoke('sonos_control', { ip, action, value })                 /* play|pause|stop|seek s|volume 0-100 */
 invoke('sonos_status', { ip })      -> { state, rel_s }
 invoke('sonos_volume', { ip })      -> number
+```
+
+Events from the core:
+
+```
+ytdlp-outdated  { line, version /* string | null */ }   /* yt-dlp stderr said it could not solve
+                                                          YouTube's JS challenges; sent on every
+                                                          such run, main.ts shows it once */
 ```
 
 Keys are snake_case on purpose. Change both sides together.

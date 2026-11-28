@@ -3,6 +3,7 @@ import Webamp from 'webamp';
 // Throwaway MSE spike (see src/spike.ts): VITE_SPIKE=1 deno task tauri dev
 if (import.meta.env.VITE_SPIKE) location.replace('/spike.html');
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 import { fxAudio, videoEl } from './msemedia';
 import { RoutedMedia, currentRoom, onSliderSync, routeTo, sonosRooms, sonosSearching, type Room } from './sonosmedia';
@@ -50,6 +51,8 @@ type StartupTracks = {
 const TEST_VIDEO_IDS = ['u1MqeDGBo94', 'Hf20ZzMRs-I', 'dkrpqUyiZgA'];
 
 const statusEl = document.getElementById('status')!;
+/** Shown under every status message until clicked; see watchYtdlp. */
+let stickyEl: HTMLElement | null = null;
 function setStatus(lines: { text: string; err?: boolean }[]) {
   statusEl.replaceChildren(
     ...lines.map((l) => {
@@ -58,7 +61,35 @@ function setStatus(lines: { text: string; err?: boolean }[]) {
       if (l.err) d.className = 'err';
       return d;
     }),
+    ...(stickyEl ? [stickyEl] : []),
   );
+}
+
+type YtdlpOutdated = { line: string; version: string | null };
+
+/**
+ * yt-dlp warned that it could not solve YouTube's JS challenges (resolve.rs),
+ * which means it is out of date: playback can break with no other error.
+ * Say so once per launch, in the status line, until clicked. Playback goes on.
+ */
+async function watchYtdlp() {
+  let shown = false;
+  await listen<YtdlpOutdated>('ytdlp-outdated', ({ payload }) => {
+    console.warn(`[yt-dlp] outdated? ${payload.version ?? '(version unknown)'}: ${payload.line}`);
+    if (shown) return;
+    shown = true;
+    const v = payload.version ? ` ${payload.version}` : '';
+    const d = document.createElement('div');
+    d.className = 'err sticky';
+    d.textContent = `yt-dlp${v} may be outdated: update it (brew upgrade yt-dlp / scoop update yt-dlp). Click to hide.`;
+    d.title = payload.line;
+    d.addEventListener('click', () => {
+      d.remove();
+      stickyEl = null;
+    });
+    stickyEl = d;
+    statusEl.append(d);
+  });
 }
 
 type Line = { text: string; err?: boolean };
@@ -337,6 +368,8 @@ function logAudioErrors() {
 
 async function main() {
   logAudioErrors();
+  // before anything runs yt-dlp, so the first warning is not missed
+  await watchYtdlp().catch((e) => console.error('[yt-dlp] cannot watch for outdated warnings', e));
   setStatus([{ text: 'loading playlist…' }]);
 
   const { tracks, lines } = await loadTracks().catch((e) => ({

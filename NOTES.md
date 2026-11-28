@@ -79,11 +79,13 @@ file, so nothing plays. Other player clients on that version fail outright. 2026
 This is the "yt-dlp breaks when YouTube changes" risk from the spec, already real: the
 update-yt-dlp action matters more than its Polish-phase slot suggests.
 
-It happened again on 2026-11-27: with 2026.10.26, yt-dlp's n/signature challenge solver crashed
-under Deno 2.9.8 (`a.addOnDisposeCallback is not a function`, then "n challenge solving failed:
-Some formats may be missing"). Audio mostly still played; the video stream came back 502, so the
-pane stayed empty. 2026.11.23 fixes it. A "challenge solving failed" warning in the `[yt-dlp]`
-lines is the sign to update yt-dlp.
+It happened again on 2026-11-27: yt-dlp 2026.10.26's challenge solver crashed under Deno 2.9.8,
+stderr carried `n challenge solving failed`, the video stream's `/v/` resolve returned 502 and
+the video pane stayed empty while audio kept playing. 2026.11.23 fixed it. Since then the core
+watches every yt-dlp run's stderr for `n challenge solving failed` and `Signature solving failed`
+(`resolve::stale_warning`) and sends a `ytdlp-outdated` event; the webview shows a one-time
+"yt-dlp may be outdated" line in the status area, click to hide. Startup logs
+`[resolve] yt-dlp version ...`. This is the warning only; the update action is still to come.
 
 ### 3. New URLs are not valid immediately
 
