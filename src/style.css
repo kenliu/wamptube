@@ -89,6 +89,13 @@ html.native-menus #webamp-context-menu { visibility: hidden; }
 #webamp .video-window #video-close { position: absolute; inset: 0; }
 #video-pane { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; object-fit: contain; }
 #webamp .video-window #video-pane { image-rendering: auto; }
+/* setVideoNote: centred text over the (empty) picture, video pane only. */
+#webamp .video-window .video-note {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+  padding: 0 16px; text-align: center; white-space: pre-line;
+  font: 9px / 1.5 monospace; color: #9f9; background: #000; pointer-events: none; /* covers the last frame */
+}
+#webamp .video-window[data-pane="video"] .video-note.on { display: flex; }
 /* FX visualizer (src/fx.ts) shares the frame; data-pane says which of the two is showing. */
 #fx-pane { position: absolute; inset: 0; width: 100%; height: 100%; background: #000; cursor: pointer; }
 #webamp .video-window #fx-pane { image-rendering: pixelated; }

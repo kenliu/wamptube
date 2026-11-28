@@ -79,6 +79,12 @@ file, so nothing plays. Other player clients on that version fail outright. 2026
 This is the "yt-dlp breaks when YouTube changes" risk from the spec, already real: the
 update-yt-dlp action matters more than its Polish-phase slot suggests.
 
+It happened again on 2026-11-27: with 2026.10.26, yt-dlp's n/signature challenge solver crashed
+under Deno 2.9.8 (`a.addOnDisposeCallback is not a function`, then "n challenge solving failed:
+Some formats may be missing"). Audio mostly still played; the video stream came back 502, so the
+pane stayed empty. 2026.11.23 fixes it. A "challenge solving failed" warning in the `[yt-dlp]`
+lines is the sign to update yt-dlp.
+
 ### 3. New URLs are not valid immediately
 
 yt-dlp 2026.10.26 reports `available_at` about 5–6 s after resolve; requests before then get 403.
@@ -265,5 +271,8 @@ here (speaker stops, local resumes at the speaker's position). 16 upstream block
   (so nothing jumps), and back here to the old local volume.
 - Not done: pause/stop/volume changed from the Sonos app don't reach Webamp's UI (no GENA events;
   only position and stop are polled), the room choice isn't kept across launches, grouped targets
-  are untested, EQ and visualizers do nothing while a room plays, and macOS is untried (Local
+  are untested, EQ and visualizers do nothing while a room plays (the video pane says
+  "Playing on Sonos: <room>" instead of a picture; a muted local picture kept in step with the
+  speaker would be possible but only loosely synced, as the speaker's position is polled once a
+  second and it buffers ahead), and macOS is untried (Local
   Network permission prompt; WKWebView menu shows "This computer" plus the rooms).
