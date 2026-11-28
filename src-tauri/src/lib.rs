@@ -91,7 +91,7 @@ pub async fn list_and_wrap(proxy: &proxy::ProxyState, source: &str) -> Result<Li
 }
 
 fn config_path() -> Result<std::path::PathBuf, String> {
-    config::path().ok_or_else(|| "cannot locate config dir: HOME is not set".to_string())
+    config::path().ok_or_else(|| "cannot locate config dir: neither HOME nor USERPROFILE is set".to_string())
 }
 
 /// Everything in the config file, in order. Sources are listed one at a time.

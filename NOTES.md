@@ -183,3 +183,17 @@ never trimmed (memory grows over a long track), each track now costs a second yt
 Not final. Engine A decodes and plays AAC in WKWebView without codec trouble, but the doubled
 duration (problem 1) has to be resolved or worked around before A is viable; if the fix needs
 ffmpeg or proves fragile, that is an argument for engine B. CPU/RAM numbers are still missing.
+
+## Windows (WebView2, 2026-11-22)
+
+Windows 10 x64, Edge WebView2 (Chromium), yt-dlp 2026.10.26 and deno 2.9.8 from Scoop.
+
+- `cargo test`, `cargo clippy --all-targets -D warnings` and the live proxy test pass.
+- `VITE_SELFTEST=1` passed all 12 checks (advance, deep seek, pause, resume on all three tracks).
+  An earlier run failed one deep seek, on track 1, right after a `play() interrupted by pause()`
+  AbortError. The rerun was clean, so that failure looks like a self-test timing race rather than
+  a Windows problem.
+- **Durations are correct** (1197 s, 335 s, 2696 s). WebView2 does not have problem 1's doubled
+  duration, which supports reading that problem as WKWebView-specific.
+- Changes needed: yt-dlp lookup (`yt-dlp.exe`, no Unix permission check, Scoop and WinGet dirs),
+  `CREATE_NO_WINDOW` on the child, `USERPROFILE` when `HOME` is unset, and an `icon.ico`.

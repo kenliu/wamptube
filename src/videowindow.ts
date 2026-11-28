@@ -68,7 +68,7 @@ export function setPane(p: Pane) {
   if (p === 'fx') {
     try {
       if (!fx) {
-        fx = new Fx(fxCanvas, fxSource());
+        fx = new Fx(fxCanvas(), fxSource());
         fx.onState = syncStrip;
       }
       fx.start();
@@ -87,9 +87,16 @@ export const toggleFx = () => setPane(pane === 'fx' ? 'off' : 'fx');
 /** VI and FX buttons in the main window, where the mono/stereo lights were; each is lit while its pane is on. */
 let viButton: HTMLElement | undefined;
 let fxButton: HTMLElement | undefined;
-const fxCanvas = document.createElement('canvas');
-fxCanvas.id = 'fx-pane';
-fxCanvas.title = 'Click for the next effect';
+// Made on first use, not at import, so the module loads without a DOM (web-tests).
+let fxCanvasEl: HTMLCanvasElement | undefined;
+function fxCanvas(): HTMLCanvasElement {
+  if (!fxCanvasEl) {
+    fxCanvasEl = document.createElement('canvas');
+    fxCanvasEl.id = 'fx-pane';
+    fxCanvasEl.title = 'Click for the next effect';
+  }
+  return fxCanvasEl;
+}
 
 function installPaneButtons() {
   const main = document.getElementById('main-window');
@@ -207,7 +214,7 @@ export function mountVideoWindow(hostEl: HTMLElement, video: HTMLVideoElement, c
     div(
       'gen-middle',
       div('gen-middle-left', div('gen-middle-left-bottom')),
-      div('gen-middle-center', video, fxCanvas, buildStrip()),
+      div('gen-middle-center', video, fxCanvas(), buildStrip()),
       div('gen-middle-right', div('gen-middle-right-bottom')),
     ),
     div('gen-bottom', div('gen-bottom-left'), div('gen-bottom-right', grip)),

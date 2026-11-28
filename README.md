@@ -1,6 +1,6 @@
 # wamptube
 
-A small Mac app for listening to music and music videos from YouTube, with the look and feel of classic
+A small Mac and Windows app for listening to music and music videos from YouTube, with the look and feel of classic
 Winamp 2. You give it YouTube playlists or videos. It plays just the audio in a Winamp-style player.
 
 <img width="1560" height="2084" alt="CleanShot 2026-11-15 at 13 42 59@2x" src="https://github.com/user-attachments/assets/aed4950b-c4f3-41ef-b58f-4164b170a618" />
@@ -46,6 +46,32 @@ refuse to play:
 ```bash
 brew upgrade yt-dlp
 ```
+
+## Windows
+
+wamptube also runs on Windows 10 and 11 (x64). It uses the Edge WebView2 runtime, which
+Windows already has.
+
+1. Download the installer (`wamptube_*_x64-setup.exe`, or the `.msi`) from the
+   [release page](https://github.com/kenliu/wamptube/releases/tag/latest) and run it.
+   It isn't signed, so SmartScreen may warn you: click **More info**, then **Run anyway**.
+2. Install yt-dlp and Deno with either package manager:
+
+   ```powershell
+   winget install yt-dlp.yt-dlp DenoLand.Deno
+   ```
+
+   ```powershell
+   scoop install yt-dlp deno
+   ```
+
+3. Open wamptube from the Start menu.
+
+The settings file is `%USERPROFILE%\.config\wamptube\config.toml`. Keep yt-dlp up to date
+with `winget upgrade yt-dlp.yt-dlp` or `scoop update yt-dlp`.
+
+To build it yourself on Windows, install Rust with [rustup](https://rustup.rs) (it sets up
+the Microsoft C++ build tools it needs), then use the same `deno` commands as below.
 
 ## Build it yourself
 
