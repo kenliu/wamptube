@@ -43,12 +43,19 @@ fn fallback_dirs() -> Vec<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        ["/opt/homebrew/bin", "/usr/local/bin"]
             .iter()
             .map(PathBuf::from)
             .collect()
     }
 }
+
+/// System dirs added to the child's PATH only. yt-dlp itself is never taken
+/// from them: a copy there is likely too old to play (see CLAUDE.md).
+#[cfg(windows)]
+const CHILD_ONLY_DIRS: &[&str] = &[];
+#[cfg(not(windows))]
+const CHILD_ONLY_DIRS: &[&str] = &["/usr/bin", "/bin"];
 
 /// Everything we learned about one video's chosen audio format.
 #[derive(Debug, Clone)]
@@ -114,7 +121,10 @@ fn child_path() -> std::ffi::OsString {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    for d in fallback_dirs() {
+    for d in fallback_dirs()
+        .into_iter()
+        .chain(CHILD_ONLY_DIRS.iter().map(PathBuf::from))
+    {
         if !dirs.contains(&d) {
             dirs.push(d);
         }
@@ -216,6 +226,30 @@ pub fn parse_ytdlp_json(video_id: &str, json: &str) -> Result<ResolvedTrack, Str
     })
 }
 
+/// Process creation flag: run a console program without opening a console window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `taskkill /T /F`: end `pid` and every process it started. Best effort.
+#[cfg(windows)]
+async fn kill_tree(pid: u32) {
+    let taskkill = std::env::var_os("SystemRoot")
+        .map(|r| PathBuf::from(r).join("System32").join("taskkill.exe"))
+        .unwrap_or_else(|| PathBuf::from("taskkill.exe"));
+    let pid = pid.to_string();
+    let run = Command::new(taskkill)
+        .args(["/PID", pid.as_str(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    match tokio::time::timeout(Duration::from_secs(5), run).await {
+        Ok(Ok(s)) if s.success() => {}
+        other => eprintln!("[yt-dlp] taskkill of pid {pid} did not succeed: {other:?}"),
+    }
+}
+
 /// Run yt-dlp with `args` and a hard timeout; returns stdout. stderr is
 /// echoed with a `[yt-dlp]` prefix. `what` names the job in error messages.
 async fn run_ytdlp(args: &[&str], timeout: Duration, what: &str) -> Result<String, String> {
@@ -230,10 +264,7 @@ async fn run_ytdlp(args: &[&str], timeout: Duration, what: &str) -> Result<Strin
     // A GUI app spawning a console program gets a console window flashing up
     // on every resolve unless told not to.
     #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    cmd.creation_flags(CREATE_NO_WINDOW);
     let child = cmd
         .args(args)
         .env("PATH", child_path())
@@ -244,10 +275,24 @@ async fn run_ytdlp(args: &[&str], timeout: Duration, what: &str) -> Result<Strin
         .spawn()
         .map_err(|e| format!("yt-dlp not found or not runnable at {}: {e}", ytdlp.display()))?;
 
-    // On timeout the future (and the Child it owns) is dropped; kill_on_drop
-    // sends SIGKILL to the process.
-    let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Err(_) => return Err(format!("yt-dlp timed out after {}s {what}", timeout.as_secs())),
+    #[cfg(windows)]
+    let pid = child.id();
+    // When this function returns, the future (and the Child it owns) is
+    // dropped and kill_on_drop kills the process (SIGKILL / TerminateProcess).
+    let mut wait = std::pin::pin!(child.wait_with_output());
+    let out = match tokio::time::timeout(timeout, wait.as_mut()).await {
+        Err(_) => {
+            // On Windows that kills only yt-dlp.exe, which may be a Scoop shim or
+            // a PyInstaller launcher with the real work in a child process.
+            // Kill the tree while the parent is still alive to be found.
+            #[cfg(windows)]
+            {
+                if let Some(pid) = pid {
+                    kill_tree(pid).await;
+                }
+            }
+            return Err(format!("yt-dlp timed out after {}s {what}", timeout.as_secs()));
+        }
         Ok(Err(e)) => return Err(format!("yt-dlp failed to run: {e}")),
         Ok(Ok(o)) => o,
     };

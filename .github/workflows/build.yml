@@ -73,6 +73,9 @@ jobs:
 
   release:
     needs: build
+    # Publish whatever built: a broken Windows build must not hold back the
+    # macOS release (and the other way round). The build job still shows red.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -85,8 +88,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
+          shopt -s nullglob
+          files=(out/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No build produced artifacts; leaving the old release in place." >&2
+            exit 1
+          fi
           gh release delete latest --cleanup-tag --yes || true
-          gh release create latest out/* \
+          gh release create latest "${files[@]}" \
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "Latest build (${GITHUB_SHA::7})" \
