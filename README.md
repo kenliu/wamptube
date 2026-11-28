@@ -53,7 +53,7 @@ wamptube also runs on Windows 10 and 11 (x64). It uses the Edge WebView2 runtime
 Windows already has.
 
 1. Download the installer (`wamptube_*_x64-setup.exe`, or the `.msi`) from the
-   [release page](https://github.com/herzigma/wamptube/releases/tag/latest) and run it.
+   [release page](https://github.com/kenliu/wamptube/releases/tag/latest) and run it.
    It isn't signed, so SmartScreen may warn you: click **More info**, then **Run anyway**.
 2. Install yt-dlp and Deno with either package manager:
 

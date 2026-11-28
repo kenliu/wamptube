@@ -223,8 +223,8 @@ Windows 10 x64, Edge WebView2 (Chromium), yt-dlp 2026.10.26 and deno 2.9.8 from 
 on port 1400) and `tests/live_sonos.rs`, which plays one track on a real speaker:
 `cargo test --test live_sonos -- --ignored --nocapture`, with `WAMPTUBE_SONOS_ROOM` to pick a
 room and `WAMPTUBE_SONOS_IP` to skip discovery. The test caps volume at 20 and restores it.
-Windows 10, five speakers on S2 (Play:1, Play:3, Playbar, Connect:Amp); passed on Kitchen
-Ceiling (Connect:Amp) and Office/Attic (Play:3).
+Windows 10, five speakers on S2 (Play:1, Play:3, Playbar, Connect:Amp); passed on a Connect:Amp
+room and a Play:3 room.
 
 - **Sonos plays YouTube's fragmented m4a (itag 140, AAC) as is** from the plain
   `/stream/{token}` URL with `Content-Type: audio/mp4`. No remux, no extension needed (the `.m4a`
@@ -254,7 +254,7 @@ Output device menu lists "Sonos: <room>" (one per zone group) under the local de
 "Searching for Sonos…" or "No Sonos rooms found" line when there are none; until 2026-11-27 the
 whole submenu was hidden on macOS in that case, which made it hard to find); picking one
 moves the current track there at the same position (`src/sonosmedia.ts`, `RoutedMedia` as Webamp's
-media class). `VITE_SELFTEST=sonos VITE_SONOS_ROOM=Office/Attic` in the real app (Windows), all
+media class). `VITE_SELFTEST=sonos VITE_SONOS_ROOM=<room>` in the real app (Windows), all
 pass: local start, move to the room (playing from 6 s, local element paused), slider volume
 reaches the speaker (6 -> 3), Webamp seek to 598/1197 s (speaker at 601), pause holds, resume,
 next track, end-of-track advance (speaker STOPPED at 335/335 s -> track 3 starts), and moving back
