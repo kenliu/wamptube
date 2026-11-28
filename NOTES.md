@@ -273,5 +273,8 @@ here (speaker stops, local resumes at the speaker's position). 16 upstream block
   (so nothing jumps), and back here to the old local volume.
 - Not done: pause/stop/volume changed from the Sonos app don't reach Webamp's UI (no GENA events;
   only position and stop are polled), the room choice isn't kept across launches, grouped targets
-  are untested, EQ and visualizers do nothing while a room plays, and macOS is untried (Local
+  are untested, EQ and visualizers do nothing while a room plays (the video pane says
+  "Playing on Sonos: <room>" instead of a picture; a muted local picture kept in step with the
+  speaker would be possible but only loosely synced, as the speaker's position is polled once a
+  second and it buffers ahead), and macOS is untried (Local
   Network permission prompt; WKWebView menu shows "This computer" plus the rooms).

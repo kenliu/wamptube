@@ -7,6 +7,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { MseMedia, videoEl } from './msemedia';
 import { setBuffering } from './throbber';
+import { setVideoNote } from './videowindow';
 import type { Room } from './output';
 
 export type { Room };
@@ -265,6 +266,8 @@ export class RoutedMedia {
     const wasPlaying = from === this.local ? !videoEl.paused : this.sonos.isPlaying();
     if (from === this.local) this.local.stop();
     this.sonos.setRoom(room);
+    // Sonos gets the audio stream only; the local picture stops with the local engine.
+    setVideoNote(room ? `Playing on Sonos: ${room.name}\nVideo shows only when playing on this computer` : null);
     console.warn(`[sonos] output -> ${room ? room.name : 'this computer'} (at ${Math.round(at)}s, ${wasPlaying ? 'playing' : 'idle'})`);
 
     // The slider follows the output: the room's own volume, or the old local one.

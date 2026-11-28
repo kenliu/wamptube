@@ -128,7 +128,8 @@ Two halves. The webview draws the UI and never contacts YouTube; the Rust core o
   Sonos room is picked, to `SonosMedia`, which sends commands and polls the speaker once a second
   (position, and STOPPED near the end = `ended`). Nothing reaches the speaker until play, so loading
   track 1 at launch never interrupts a room. Switching output carries the track and position over,
-  and the volume slider follows the output (the room's own volume, or the old local one).
+  and the volume slider follows the output (the room's own volume, or the old local one). The
+  speaker gets audio only, so while a room plays the video pane shows a note (`setVideoNote`).
 - `src-tauri/src/sonos.rs` – Sonos discovery (SSDP on every interface), one room per zone group
   (addressed by its coordinator), and transport/volume SOAP calls on port 1400. Commands accept
   only addresses the last discovery returned. The speaker fetches from `proxy::start_on(lan_ip)`,

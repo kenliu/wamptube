@@ -98,6 +98,18 @@ function fxCanvas(): HTMLCanvasElement {
   return fxCanvasEl;
 }
 
+/** A line of text over the picture, e.g. while a Sonos room plays (it gets audio only). */
+let noteEl: HTMLElement | undefined;
+function videoNote(): HTMLElement {
+  if (!noteEl) noteEl = div('video-note');
+  return noteEl;
+}
+export function setVideoNote(text: string | null) {
+  const n = videoNote();
+  n.textContent = text ?? '';
+  n.classList.toggle('on', !!text);
+}
+
 function installPaneButtons() {
   const main = document.getElementById('main-window');
   if (!main || viButton) return;
@@ -214,7 +226,7 @@ export function mountVideoWindow(hostEl: HTMLElement, video: HTMLVideoElement, c
     div(
       'gen-middle',
       div('gen-middle-left', div('gen-middle-left-bottom')),
-      div('gen-middle-center', video, fxCanvas(), buildStrip()),
+      div('gen-middle-center', video, videoNote(), fxCanvas(), buildStrip()),
       div('gen-middle-right', div('gen-middle-right-bottom')),
     ),
     div('gen-bottom', div('gen-bottom-left'), div('gen-bottom-right', grip)),
